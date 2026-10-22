@@ -209,7 +209,42 @@ def buy_case(row):
         parts.append(f"F_SCORE is {int(row['F_SCORE'])}/9")
     if pd.notna(row.get("BUY_score")):
         parts.append(f"combined BUY score is {row['BUY_score']:.1f}/100")
-    return "; ".join(parts) + "." if parts else "Insufficient data."
+
+    if not parts:
+        return "Insufficient data."
+
+    interpretation = []
+    gpa_pct = row.get("GPA_strength_pct")
+    bm_pct = row.get("BM_strength_pct")
+    fs = row.get("F_SCORE")
+
+    if pd.notna(gpa_pct):
+        if gpa_pct >= 75:
+            interpretation.append("strong profitability")
+        elif gpa_pct >= 50:
+            interpretation.append("above-median profitability")
+        else:
+            interpretation.append("weaker profitability")
+
+    if pd.notna(bm_pct):
+        if bm_pct >= 75:
+            interpretation.append("an attractive relative valuation")
+        elif bm_pct >= 50:
+            interpretation.append("a reasonable relative valuation")
+        else:
+            interpretation.append("a less attractive relative valuation")
+
+    if pd.notna(fs):
+        if fs >= 8:
+            interpretation.append("very strong financial strength")
+        elif fs >= 7:
+            interpretation.append("solid financial strength")
+        else:
+            interpretation.append("more mixed financial strength")
+
+    if interpretation:
+        return "; ".join(parts) + ". This combination suggests " + ", ".join(interpretation) + " under the current BUY rules."
+    return "; ".join(parts) + "."
 
 
 def sell_case(row):
@@ -220,9 +255,19 @@ def sell_case(row):
         reasons.append(f"high SNOA risk ({row.get('SNOA_risk_pct', np.nan):.0f}th percentile)")
     if row.get("flag_Altman") is True or row.get("flag_Altman") == 1:
         reasons.append(f"Altman Z of {row.get('Altman_Z', np.nan):.2f} is below the selected cutoff")
+
     if not reasons:
         return "No selected SELL red flags."
-    return "Triggers " + ", ".join(reasons) + "."
+
+    count = int(row.get("sell_red_flags", len(reasons)))
+    if count >= 3:
+        conclusion = "Together, the accrual and distress signals indicate a broad deterioration-risk profile under the current SELL rules."
+    elif count == 2:
+        conclusion = "The combination of two independent warning signals makes the company a stronger risk candidate than a single-metric flag."
+    else:
+        conclusion = "This is a single warning signal and should be interpreted more cautiously."
+
+    return "Triggers " + ", ".join(reasons) + ". " + conclusion
 
 
 # -----------------------------
@@ -509,26 +554,42 @@ with tabs[1]:
     s3.metric("SNOA flags", f"{int(analysis_df['flag_SNOA'].fillna(False).sum()):,}")
     s4.metric("Altman flags", f"{int(analysis_df['flag_Altman'].fillna(False).sum()):,}")
 
-    cols = [
-        "ticker", "company_name", "sector", "market_cap",
-        "STA", "STA_risk_pct", "SNOA", "SNOA_risk_pct",
-        "Altman_Z", "flag_STA", "flag_SNOA", "flag_Altman",
-        "sell_red_flags", "SELL_candidate"
+    sell_display = analysis_df.sort_values(
+        ["SELL_candidate", "sell_red_flags", "STA_risk_pct"],
+        ascending=[False, False, False]
+    ).copy()
+
+    sell_display["Market Cap"] = sell_display["market_cap"].apply(compact_money)
+    sell_display["STA"] = sell_display["STA"] * 100
+    sell_display["SNOA"] = sell_display["SNOA"] * 100
+
+    sell_display = sell_display[
+        [
+            "ticker", "company_name", "sector", "Market Cap",
+            "STA", "STA_risk_pct", "SNOA", "SNOA_risk_pct",
+            "Altman_Z", "flag_STA", "flag_SNOA", "flag_Altman",
+            "sell_red_flags", "SELL_candidate"
+        ]
     ]
+
     st.dataframe(
-        analysis_df.sort_values(
-            ["SELL_candidate", "sell_red_flags", "STA_risk_pct"],
-            ascending=[False, False, False]
-        )[cols],
+        sell_display,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "market_cap": st.column_config.NumberColumn(format="$%.0f"),
-            "STA": st.column_config.NumberColumn(format="%.4f"),
-            "SNOA": st.column_config.NumberColumn(format="%.4f"),
-            "Altman_Z": st.column_config.NumberColumn(format="%.2f"),
-            "STA_risk_pct": st.column_config.NumberColumn(format="%.1f"),
-            "SNOA_risk_pct": st.column_config.NumberColumn(format="%.1f"),
+            "ticker": "Ticker",
+            "company_name": "Company",
+            "sector": "Sector",
+            "STA": st.column_config.NumberColumn("STA (%)", format="%.1f"),
+            "STA_risk_pct": st.column_config.NumberColumn("STA risk percentile", format="%.1f"),
+            "SNOA": st.column_config.NumberColumn("SNOA (%)", format="%.1f"),
+            "SNOA_risk_pct": st.column_config.NumberColumn("SNOA risk percentile", format="%.1f"),
+            "Altman_Z": st.column_config.NumberColumn("Altman Z", format="%.2f"),
+            "flag_STA": "STA flag",
+            "flag_SNOA": "SNOA flag",
+            "flag_Altman": "Altman flag",
+            "sell_red_flags": "Red flags",
+            "SELL_candidate": "SELL candidate",
         },
     )
 
@@ -554,22 +615,39 @@ with tabs[2]:
     b3.metric("BUY candidates", f"{len(buy):,}")
     b4.metric("Top F_SCORE", "—" if analysis_df["F_SCORE"].dropna().empty else f"{analysis_df['F_SCORE'].max():.0f}/9")
 
-    cols = [
-        "BUY_rank", "ticker", "company_name", "sector", "market_cap",
-        "GPA", "GPA_strength_pct", "BM", "BM_strength_pct",
-        "F_SCORE", "F_SCORE_strength_pct", "BUY_score", "BUY_candidate"
+    buy_display = analysis_df.sort_values(
+        ["BUY_candidate", "BUY_score"],
+        ascending=[False, False]
+    ).copy()
+
+    buy_display["Market Cap"] = buy_display["market_cap"].apply(compact_money)
+    buy_display["GPA"] = buy_display["GPA"] * 100
+
+    buy_display = buy_display[
+        [
+            "BUY_rank", "ticker", "company_name", "sector", "Market Cap",
+            "GPA", "GPA_strength_pct", "BM", "BM_strength_pct",
+            "F_SCORE", "F_SCORE_strength_pct", "BUY_score", "BUY_candidate"
+        ]
     ]
+
     st.dataframe(
-        analysis_df.sort_values(["BUY_candidate", "BUY_score"], ascending=[False, False])[cols],
+        buy_display,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "GPA": st.column_config.NumberColumn(format="%.4f"),
-            "BM": st.column_config.NumberColumn(format="%.4f"),
-            "BUY_score": st.column_config.NumberColumn(format="%.1f"),
-            "GPA_strength_pct": st.column_config.NumberColumn(format="%.1f"),
-            "BM_strength_pct": st.column_config.NumberColumn(format="%.1f"),
-            "F_SCORE_strength_pct": st.column_config.NumberColumn(format="%.1f"),
+            "BUY_rank": "BUY rank",
+            "ticker": "Ticker",
+            "company_name": "Company",
+            "sector": "Sector",
+            "GPA": st.column_config.NumberColumn("GPA (%)", format="%.1f"),
+            "GPA_strength_pct": st.column_config.NumberColumn("GPA percentile", format="%.1f"),
+            "BM": st.column_config.NumberColumn("B/M", format="%.3f"),
+            "BM_strength_pct": st.column_config.NumberColumn("B/M percentile", format="%.1f"),
+            "F_SCORE": st.column_config.NumberColumn("F_SCORE", format="%.0f"),
+            "F_SCORE_strength_pct": st.column_config.NumberColumn("F_SCORE percentile", format="%.1f"),
+            "BUY_score": st.column_config.NumberColumn("BUY score", format="%.1f"),
+            "BUY_candidate": "BUY candidate",
         },
     )
 
@@ -606,7 +684,7 @@ with tabs[3]:
             status.append("BUY candidate")
         if row["SELL_candidate"]:
             status.append("SELL candidate")
-        st.write("**Current screen status:** " + (", ".join(status) if status else "Neither"))
+        st.write("**Current screen status:** " + (", ".join(status) if status else "Not selected as BUY or SELL under current thresholds."))
 
         st.markdown("#### F_SCORE components")
         component_cols = [
@@ -670,13 +748,14 @@ If that is unavailable, it uses the change in ordinary shares outstanding as a t
         """
     )
 
-    st.markdown("#### Missing observations")
+    st.markdown("#### Coverage for current filters")
+    st.caption("Counts below reflect only the companies currently included by the sidebar universe filters.")
     metrics = ["GPA", "BM", "STA", "SNOA", "Altman_Z", "F_SCORE"]
     miss = pd.DataFrame(
         {
             "Metric": metrics,
-            "Missing observations": [int(analysis_df[m].isna().sum()) for m in metrics],
-            "Available observations": [int(analysis_df[m].notna().sum()) for m in metrics],
+            "Missing": [int(analysis_df[m].isna().sum()) for m in metrics],
+            "Available": [int(analysis_df[m].notna().sum()) for m in metrics],
         }
     )
     st.dataframe(miss, use_container_width=True, hide_index=True)

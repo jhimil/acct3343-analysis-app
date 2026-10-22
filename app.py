@@ -517,7 +517,13 @@ with tabs[0]:
             hover_data=["company_name", "sector", "F_SCORE", "Altman_Z"],
             labels={"BM": "Book-to-Market", "GPA": "Gross Profitability"},
         )
+        # Visual zoom only: firms outside this displayed range remain in all calculations.
+        fig.update_xaxes(range=[0, 2])
         st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Chart is visually zoomed to Book-to-Market values from 0 to 2 for readability. "
+            "Companies outside this displayed range remain included in the screening calculations."
+        )
 
     st.markdown("#### Quantitative investment cases")
     bc1, bc2 = st.columns(2)
